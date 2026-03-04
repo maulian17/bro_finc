@@ -33,8 +33,12 @@ bot.on('message', async (msg) => {
   const userId = msg.from.id;
   const userText = msg.text || '';
   
-  // Proteksi Akses
-  if (userId !== allowedUserId) return;
+// Proteksi Akses
+  if (userId !== allowedUserId) {
+    bot.sendMessage(chatId, `Akses ditolak! Tapi hei, ID Telegram kamu adalah: ${userId}`);
+    console.log(`Akses ditolak untuk ID: ${userId}. Di .env terbaca: ${allowedUserId}`);
+    return;
+  }
 
   try {
     // ==========================================
