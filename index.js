@@ -4,7 +4,6 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
 
-// --- INISIALISASI ---
 const token = process.env.TELEGRAM_TOKEN;
 const bot = new TelegramBot(token, { polling: true });
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -12,132 +11,62 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANO
 
 const allowedUserId = parseInt(process.env.ALLOWED_USER_ID, 10);
 
-// --- SYSTEM INSTRUCTIONS ---
-const recordInstruction = `
-Kamu adalah asisten pencatat keuangan pribadi. Tugasmu mengekstrak data transaksi dari pesan user (teks atau foto struk).
-1. Respon HARUS SELALU SATU objek JSON valid. Jangan ada teks markdown seperti \`\`\`json.
-2. Format berhasil: {"type": "expense" atau "income", "amount": angka (tanpa titik/koma), "category": "string", "description": "string", "status": "success"}
-3. Format gagal/bukan transaksi: {"status": "error", "message": "Maaf, itu bukan format transaksi yang saya pahami."}
+// --- 1. INSTRUKSI MASTER (ROUTER & PENCATAT) ---
+const masterInstruction = `
+Kamu adalah asisten keuangan pribadi yang jenius. Baca pesan atau gambar dari user, lalu tentukan apa maksud (intent) user. 
+Balas HANYA dengan satu objek JSON yang valid tanpa markdown teks tambahan.
+
+Pilihan "intent":
+1. "record": User memberikan data uang masuk/keluar.
+2. "saldo": User menanyakan sisa uang/saldo total keseluruhan.
+3. "report": User menanyakan total/laporan bulan ini.
+4. "analisa": User meminta saran, evaluasi, atau curhat soal keuangannya.
+5. "other": User hanya menyapa (Halo, Pagi) atau ngobrol di luar konteks.
+
+Format JSON Wajib:
+{
+  "intent": "record" | "saldo" | "report" | "analisa" | "other",
+  "record_data": {
+    "type": "income" | "expense",
+    "amount": angka_tanpa_titik,
+    "category": "string",
+    "description": "string",
+    "status": "success" | "error"
+  },
+  "reply": "Isi dengan balasan ramah JIKA intent adalah 'other' (misal membalas sapaan)"
+}
 `;
 
+// --- 2. INSTRUKSI KHUSUS ANALISA ---
 const analysisInstruction = `
 Kamu adalah penasihat keuangan profesional. Analisis data transaksi berformat JSON berikut.
-Berikan ringkasan: kategori pengeluaran terbesar, evaluasi arus kas, deteksi pemborosan, dan 3 saran praktis untuk bulan depan.
-Gunakan bahasa Indonesia yang santai, rapi, dan gunakan emoji.
+Berikan ringkasan, evaluasi arus kas, deteksi pemborosan, dan saran praktis. Gunakan bahasa Indonesia santai dan emoji.
 `;
 
-console.log('✅ Bot Asisten Keuangan menyala dan siap menerima perintah...');
+console.log('✅ Bot Asisten Keuangan Fleksibel (NLP) menyala...');
 
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const userText = msg.text || '';
   
-// Proteksi Akses
-  if (userId !== allowedUserId) {
-    bot.sendMessage(chatId, `Akses ditolak! Tapi hei, ID Telegram kamu adalah: ${userId}`);
-    console.log(`Akses ditolak untuk ID: ${userId}. Di .env terbaca: ${allowedUserId}`);
-    return;
-  }
+  if (userId !== allowedUserId) return;
+
+  bot.sendChatAction(chatId, 'typing');
 
   try {
     // ==========================================
-    // 1. PENANGANAN PERINTAH (COMMANDS)
+    // FASE 1: GEMINI MEMAHAMI MAKSUD USER (ROUTING)
     // ==========================================
-    if (userText.startsWith('/')) {
-      
-      // -- PERINTAH: /saldo --
-      if (userText === '/saldo') {
-        bot.sendChatAction(chatId, 'typing');
-        const { data, error } = await supabase.from('transactions').select('type, amount').eq('user_id', userId);
-        if (error) throw error;
-
-        let income = 0, expense = 0;
-        data.forEach(t => {
-          if (t.type === 'income') income += Number(t.amount);
-          if (t.type === 'expense') expense += Number(t.amount);
-        });
-
-        const balance = income - expense;
-        const pesan = `💰 *INFORMASI SALDO KESELURUHAN*\n\n📈 Pemasukan: Rp${income.toLocaleString('id-ID')}\n📉 Pengeluaran: Rp${expense.toLocaleString('id-ID')}\n\n💳 *Saldo Tersisa: Rp${balance.toLocaleString('id-ID')}*`;
-        bot.sendMessage(chatId, pesan, { parse_mode: 'Markdown' });
-        return;
-      }
-
-      // -- PERINTAH: /report --
-      if (userText === '/report') {
-        bot.sendChatAction(chatId, 'typing');
-        const now = new Date();
-        const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-
-        const { data, error } = await supabase
-          .from('transactions')
-          .select('type, amount')
-          .eq('user_id', userId)
-          .gte('created_at', firstDay);
-        
-        if (error) throw error;
-
-        let incomeMonth = 0, expenseMonth = 0;
-        data.forEach(t => {
-          if (t.type === 'income') incomeMonth += Number(t.amount);
-          if (t.type === 'expense') expenseMonth += Number(t.amount);
-        });
-
-        const namaBulan = now.toLocaleString('id-ID', { month: 'long', year: 'numeric' });
-        const pesan = `📊 *LAPORAN BULAN ${namaBulan.toUpperCase()}*\n\n🟢 Pemasukan: Rp${incomeMonth.toLocaleString('id-ID')}\n🔴 Pengeluaran: Rp${expenseMonth.toLocaleString('id-ID')}`;
-        bot.sendMessage(chatId, pesan, { parse_mode: 'Markdown' });
-        return;
-      }
-
-      // -- PERINTAH: /analisa --
-      if (userText === '/analisa') {
-        bot.sendChatAction(chatId, 'typing');
-        bot.sendMessage(chatId, "⏳ Membaca data transaksi bulan ini dan meracik analisa...");
-
-        const now = new Date();
-        const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-
-        const { data, error } = await supabase
-          .from('transactions')
-          .select('type, amount, category, description, created_at')
-          .eq('user_id', userId)
-          .gte('created_at', firstDay);
-
-        if (error) throw error;
-        if (data.length === 0) {
-          bot.sendMessage(chatId, "Belum ada transaksi bulan ini untuk dianalisis.");
-          return;
-        }
-
-        const analysisModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash", systemInstruction: analysisInstruction });
-        const dataString = JSON.stringify(data);
-        const prompt = `Berikut data transaksiku bulan ini: ${dataString}. Tolong berikan analisamu.`;
-
-        const result = await analysisModel.generateContent(prompt);
-        bot.sendMessage(chatId, result.response.text(), { parse_mode: 'Markdown' });
-        return;
-      }
-
-      bot.sendMessage(chatId, "Perintah tidak dikenali. Gunakan: /saldo, /report, atau /analisa.");
-      return;
-    }
-
-    // ==========================================
-    // 2. PENCATATAN TRANSAKSI (TEKS & STRUK GAMBAR)
-    // ==========================================
-    bot.sendChatAction(chatId, 'typing');
-    
-    const recordModel = genAI.getGenerativeModel({ 
+    const masterModel = genAI.getGenerativeModel({ 
       model: "gemini-2.5-flash",
-      systemInstruction: recordInstruction,
+      systemInstruction: masterInstruction,
       generationConfig: { responseMimeType: "application/json" }
     });
 
     let jsonResponseText = '';
 
     if (msg.photo) {
-      // Proses Gambar Struk
       const photoId = msg.photo[msg.photo.length - 1].file_id;
       const fileLink = await bot.getFileLink(photoId);
       const response = await fetch(fileLink);
@@ -145,45 +74,85 @@ bot.on('message', async (msg) => {
       const base64Data = Buffer.from(arrayBuffer).toString('base64');
       const imagePart = { inlineData: { data: base64Data, mimeType: 'image/jpeg' } };
       
-      const result = await recordModel.generateContent(["Ekstrak data transaksi keuangan dari gambar ini.", imagePart]);
+      const result = await masterModel.generateContent(["Apa maksud dari gambar ini? Jika ini struk, ekstrak datanya.", imagePart]);
       jsonResponseText = result.response.text();
     } else if (userText) {
-      // Proses Teks
-      const result = await recordModel.generateContent(userText);
+      const result = await masterModel.generateContent(userText);
       jsonResponseText = result.response.text();
+    } else {
+      return; // Abaikan stiker/dokumen
     }
 
-    // Parsing hasil JSON dari Gemini
-    let transactionData;
-    try {
-      transactionData = JSON.parse(jsonResponseText);
-    } catch (e) {
-      console.error("Gagal parse JSON:", jsonResponseText);
-      throw new Error("Format AI tidak sesuai JSON.");
+    const botDecision = JSON.parse(jsonResponseText);
+    const intent = botDecision.intent;
+
+    // ==========================================
+    // FASE 2: EKSEKUSI SESUAI MAKSUD (INTENT)
+    // ==========================================
+
+    if (intent === 'other') {
+      // Jika user cuma bilang "Halo" atau curhat biasa
+      bot.sendMessage(chatId, botDecision.reply);
+      return;
     }
 
-    // Eksekusi Penyimpanan Database
-    if (transactionData && transactionData.status === 'success') {
-      const { error: dbError } = await supabase
-        .from('transactions')
-        .insert([{
-          user_id: userId,
-          type: transactionData.type,
-          amount: transactionData.amount,
-          category: transactionData.category,
-          description: transactionData.description
+    if (intent === 'record') {
+      const data = botDecision.record_data;
+      if (data && data.status === 'success') {
+        await supabase.from('transactions').insert([{
+          user_id: userId, type: data.type, amount: data.amount,
+          category: data.category, description: data.description
         }]);
+        const jenis = data.type === 'income' ? 'Pemasukan' : 'Pengeluaran';
+        bot.sendMessage(chatId, `✅ *${jenis} Dicatat!*\n📂 ${data.category}\n💵 Rp${data.amount.toLocaleString('id-ID')}\n📝 ${data.description}`, { parse_mode: 'Markdown' });
+      } else {
+        bot.sendMessage(chatId, "🤔 Maaf, aku ga nemu nominal atau data yang jelas untuk dicatat.");
+      }
+      return;
+    }
 
-      if (dbError) throw dbError;
+    if (intent === 'saldo') {
+      const { data, error } = await supabase.from('transactions').select('type, amount').eq('user_id', userId);
+      if (error) throw error;
+      let income = 0, expense = 0;
+      data.forEach(t => { t.type === 'income' ? income += Number(t.amount) : expense += Number(t.amount); });
+      const balance = income - expense;
+      bot.sendMessage(chatId, `💰 *Sisa Uangmu Sekarang: Rp${balance.toLocaleString('id-ID')}*\n(Total Pemasukan: Rp${income.toLocaleString('id-ID')} | Pengeluaran: Rp${expense.toLocaleString('id-ID')})`, { parse_mode: 'Markdown' });
+      return;
+    }
 
-      const jenis = transactionData.type === 'income' ? 'Pemasukan' : 'Pengeluaran';
-      bot.sendMessage(chatId, `✅ *${jenis} Dicatat!*\n📂 Kategori: ${transactionData.category}\n💵 Nominal: Rp${transactionData.amount.toLocaleString('id-ID')}\n📝 Keterangan: ${transactionData.description}`, { parse_mode: 'Markdown' });
-    } else if (transactionData && transactionData.status === 'error') {
-      bot.sendMessage(chatId, `🤔 ${transactionData.message}`);
+    if (intent === 'report') {
+      const now = new Date();
+      const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+      const { data, error } = await supabase.from('transactions').select('type, amount').eq('user_id', userId).gte('created_at', firstDay);
+      if (error) throw error;
+      let incMonth = 0, expMonth = 0;
+      data.forEach(t => { t.type === 'income' ? incMonth += Number(t.amount) : expMonth += Number(t.amount); });
+      bot.sendMessage(chatId, `📊 *Laporan Bulan Ini*\n🟢 Pemasukan: Rp${incMonth.toLocaleString('id-ID')}\n🔴 Pengeluaran: Rp${expMonth.toLocaleString('id-ID')}`, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (intent === 'analisa') {
+      bot.sendMessage(chatId, "⏳ Sebentar, aku baca catatan transaksimu bulan ini dulu ya...");
+      const now = new Date();
+      const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+      const { data, error } = await supabase.from('transactions').select('type, amount, category, description').eq('user_id', userId).gte('created_at', firstDay);
+      if (error) throw error;
+      
+      if (data.length === 0) {
+        bot.sendMessage(chatId, "Kamu belum mencatat apa-apa bulan ini, jadi belum bisa dianalisa nih!");
+        return;
+      }
+
+      const analysisModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash", systemInstruction: analysisInstruction });
+      const prompt = `Ini dataku bulan ini: ${JSON.stringify(data)}. Tolong analisakan.`;
+      const result = await analysisModel.generateContent(prompt);
+      bot.sendMessage(chatId, result.response.text(), { parse_mode: 'Markdown' });
+      return;
     }
 
   } catch (error) {
     console.error('Error Global:', error);
-    bot.sendMessage(chatId, "⚠️ Maaf, terjadi kesalahan pada sistem saat memproses datamu.");
+    bot.sendMessage(chatId, "⚠️ Waduh, ada sedikit gangguan di sistemku nih.");
   }
 });
